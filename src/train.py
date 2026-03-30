@@ -1,6 +1,7 @@
 import os
 import shutil
 import argparse
+import glob
 
 import numpy as np
 import zarr
@@ -11,6 +12,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
+def find_zarr_store(channel_dir):
+    matches = glob.glob(os.path.join(channel_dir, "*.zarr"))
+    if not matches:
+        raise FileNotFoundError(f"No .zarr store found in {channel_dir}")
+    return matches[0]
+
 # ---------------------------------------------------------------------------
 # Dataset
 # ---------------------------------------------------------------------------
@@ -18,9 +25,12 @@ class ZarrDataset(Dataset):
     def __init__(self, zarr_path, indices):
         self.zarr_path = zarr_path
         self.indices = indices
+        print(f"DEBUG init zarr_path: {zarr_path}")
 
     def _open_store(self):
         if not hasattr(self, 'store'):
+            #fs = s3fs.S3FileSystem()
+            #store = s3fs.S3Map(root=self.zarr_path, s3=fs, check=False)
             self.store = zarr.open(self.zarr_path, mode='r')
 
     def __len__(self):
@@ -87,29 +97,46 @@ class InteriorBoundsCNN(nn.Module):
         }
         
 def train(args):
+    print(f"DEBUG zarr verions:{zarr.__version__}")
+    print(f"DEBUG s3fs verions:{s3fs.__version__}")
     model_dir = os.environ["SM_MODEL_DIR"]
+    
+
+    zarr_channel = os.environ["SM_CHANNEL_ZARR"]
+    print(f"SM_CHANNEL_ZARR: {zarr_channel}")
+    
+    """ print("Contents of zarr channel:")
+    for root, dirs, files in os.walk(zarr_channel):
+        print(f"{root}")
+        for f in files:
+            print(f"  {f}") """
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     train_idx = np.load(args.train_idx)
     val_idx = np.load(args.val_idx)
+    
+    zarr_path = os.path.join(zarr_channel, "data.zarr")
+    print(f"DEBUG zarr_path:{zarr_path}")
+    print("Exists?", os.path.exists(zarr_path))
         
-    train_dataset = ZarrDataset(args.zarr_path, np.sort(train_idx))
-    val_dataset   = ZarrDataset(args.zarr_path, val_idx)
+    train_dataset = ZarrDataset(zarr_path, np.sort(train_idx))
+    val_dataset   = ZarrDataset(zarr_path, val_idx)
     
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=min(16, os.cpu_count()),
+        num_workers=0,
         pin_memory=True,
     )
+    
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=min(16, os.cpu_count()),
+        num_workers=0,
         pin_memory=True,
     )
     
@@ -125,10 +152,10 @@ def train(args):
         model.train()
         train_loss = 0.0
         for batch in train_loader:
-            inside_mask  = batch["inside_mask"].to(device)
-            boundary_mask  = batch["boundary_mask"].to(device)
-            room_mask  = batch["room_mask"].to(device)
-            door_mask  = batch["door_mask"].to(device)
+            inside_mask  = batch["inside_mask"].to(device).float()
+            boundary_mask  = batch["boundary_mask"].to(device).float()
+            room_mask  = batch["room_mask"].to(device).float().unsqueeze(1)
+            door_mask  = batch["door_mask"].to(device).float().unsqueeze(1)
 
             optimizer.zero_grad()
             predictions = model(inside_mask, boundary_mask)
@@ -149,8 +176,8 @@ def train(args):
             for batch in val_loader:
                 inside_mask   = batch['inside_mask'].to(device).float()
                 boundary_mask = batch['boundary_mask'].to(device).float()
-                room_mask     = batch['room_mask'].to(device).float()
-                door_mask     = batch['door_mask'].to(device).float()
+                room_mask     = batch['room_mask'].to(device).float().unsqueeze(1)
+                door_mask     = batch['door_mask'].to(device).float().unsqueeze(1)
 
                 predictions = model(inside_mask, boundary_mask)
                 loss = criterion(predictions['room_mask'], room_mask) \
@@ -179,10 +206,11 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size",    type=int,   default=32)
     
     # Data
-    parser.add_argument("--zarr-path",     type=str, default=None)
-    parser.add_argument("--train-idx",     default=os.path.join(os.environ["SM_CHANNEL_INDICES"], "train_indices.npy"))
-    parser.add_argument("--val-idx",       default=os.path.join(os.environ["SM_CHANNEL_INDICES"], "val_indices.npy"))
-    
+    #parser.add_argument("--zarr-path",     type=str, default=None)
+    #parser.add_argument("--zarr-path", default=os.path.join(os.environ.get("SM_CHANNEL_ZARR", ""), "data.zarr"))
+    parser.add_argument("--train-idx", default=os.path.join(os.environ["SM_CHANNEL_INDICES"], "train_indices.npy"))
+    parser.add_argument("--val-idx",   default=os.path.join(os.environ["SM_CHANNEL_INDICES"], "val_indices.npy"))
+        
     args = parser.parse_args()
 
     train(args)
