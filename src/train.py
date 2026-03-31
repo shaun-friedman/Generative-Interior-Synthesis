@@ -128,7 +128,7 @@ def train(args):
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=0,
+        num_workers=min(16, os.cpu_count()),
         pin_memory=True,
     )
     
@@ -136,7 +136,7 @@ def train(args):
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=0,
+        num_workers=min(16, os.cpu_count()),
         pin_memory=True,
     )
     
@@ -190,7 +190,7 @@ def train(args):
         # --- Checkpoint ---
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(model_dir, "best_model.pt"))
+            torch.save(model.state_dict(), os.path.join(model_dir, "model_best.pth"))
             print(f"  Saved new best model (val loss: {val_loss:.4f})")
 
 # ---------------------------------------------------------------------------
