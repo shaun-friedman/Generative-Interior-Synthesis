@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
+from torchvision import models, transforms
 
 def find_zarr_store(channel_dir):
     matches = glob.glob(os.path.join(channel_dir, "*.zarr"))
@@ -25,6 +26,7 @@ class ZarrDataset(Dataset):
     def __init__(self, zarr_path, indices):
         self.zarr_path = zarr_path
         self.indices = indices
+        #self.transforms = transforms
         print(f"DEBUG init zarr_path: {zarr_path}")
 
     def _open_store(self):
@@ -39,11 +41,23 @@ class ZarrDataset(Dataset):
     def __getitem__(self, idx):
         self._open_store()
         i = self.indices[idx] 
+
+        inside_mask =   self.store['inside_masks'][i]
+        boundary_mask = self.store['boundary_masks'][i]
+        room_mask =     self.store['room_masks'][i]
+        door_mask =     self.store['door_masks'][i]
+
+        """ if self.transforms:
+            inside_mask =   self.transforms(inside_mask)
+            boundary_mask = self.transforms(boundary_mask)
+            room_mask =     self.transforms(room_mask)
+            door_mask =     self.transforms(door_mask) """
+        
         return {
-            'inside_mask':   torch.from_numpy(self.store['inside_masks'][i]),
-            'boundary_mask': torch.from_numpy(self.store['boundary_masks'][i]),
-            'room_mask':     torch.from_numpy(self.store['room_masks'][i]),
-            'door_mask':     torch.from_numpy(self.store['door_masks'][i]),
+            'inside_mask':   torch.from_numpy(inside_mask),
+            'boundary_mask': torch.from_numpy(boundary_mask),
+            'room_mask':     torch.from_numpy(room_mask),
+            'door_mask':     torch.from_numpy(door_mask),
         }
         
 
@@ -51,11 +65,20 @@ class ZarrDataset(Dataset):
 # Interior Walls and Doors Model
 # ---------------------------------------------------------------------------
 class InteriorBoundsCNN(nn.Module):
-    def __init__(self):
+    def __init__(self, pretrained: bool = True):
         super().__init__()
+        
+        self.input_conv = self.conv_block(2, 3)
+        
+        # Backbone
+        backbone = models.resnet18(
+            weights=models.ResNet18_Weights.DEFAULT if pretrained else None
+        )
+        # Remove last 2 layers
+        self.backbone = nn.Sequential(*list(backbone.children())[:-2])
 
         # Encoder
-        self.enc1 = self.conv_block(2, 32)   # 2 input channels: inside + boundary
+        self.enc1 = self.conv_block(2, 32)
         self.enc2 = self.conv_block(32, 64)
         self.enc3 = self.conv_block(64, 128)
 
@@ -81,7 +104,12 @@ class InteriorBoundsCNN(nn.Module):
 
     def forward(self, inside_mask, boundary_mask):
         x = torch.stack([inside_mask, boundary_mask], dim=1).float()
-
+        x = self.input_conv(x)
+        x = self.backbone(x)
+        
+        x = F.interpolate(x, size=(256, 256), mode='bilinear', align_corners=False)
+        x = nn.Conv2d(512, 2, kernel_size=1)(x)
+        
         # Encoder with skip connections
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool(e1))
@@ -95,7 +123,124 @@ class InteriorBoundsCNN(nn.Module):
             'room_mask': self.room_head(d1),
             'door_mask': self.door_head(d1),
         }
-        
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import models
+
+
+class ConvBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class UpBlock(nn.Module):
+    def __init__(self, in_ch, skip_ch, out_ch):
+        super().__init__()
+        self.conv = ConvBlock(in_ch + skip_ch, out_ch)
+
+    def forward(self, x, skip):
+        x = F.interpolate(x, size=skip.shape[-2:], mode='bilinear', align_corners=False)
+        x = torch.cat([x, skip], dim=1)
+        return self.conv(x)
+
+
+class ResNetUNet(nn.Module):
+    def __init__(self, pretrained=True):
+        super().__init__()
+
+        # ---- Input stem (2 → 3 channels) ----
+        self.stem = nn.Conv2d(2, 3, kernel_size=3, padding=1)
+
+        # ---- ResNet backbone ----
+        backbone = models.resnet50(
+            weights=models.ResNet50_Weights.DEFAULT if pretrained else None
+        )
+
+        # Extract layers
+        self.layer0 = nn.Sequential(
+            backbone.conv1,
+            backbone.bn1,
+            backbone.relu,
+        )  # 64 ch
+        self.pool = backbone.maxpool
+
+        self.layer1 = backbone.layer1  # 256 ch
+        self.layer2 = backbone.layer2  # 512 ch
+        self.layer3 = backbone.layer3  # 1024 ch
+        self.layer4 = backbone.layer4  # 2048 ch
+
+        # ---- Decoder ----
+        self.up4 = UpBlock(2048, 1024, 1024)
+        self.up3 = UpBlock(1024, 512, 512)
+        self.up2 = UpBlock(512, 256, 256)
+        self.up1 = UpBlock(256, 64, 128)
+
+        self.final_up = nn.Sequential(
+            nn.Conv2d(128, 64, 3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+
+        # ---- Output heads ----
+        self.room_head = nn.Conv2d(64, 1, kernel_size=1)
+        self.door_head = nn.Conv2d(64, 1, kernel_size=1)
+
+    def forward(self, inside_mask, boundary_mask):
+        # Stack input
+        x = torch.stack([inside_mask, boundary_mask], dim=1).float()
+
+        # Stem
+        x = self.stem(x)
+
+        # ---- Encoder ----
+        x0 = self.layer0(x)        # [B, 64, H/2, W/2]
+        x1 = self.pool(x0)         # [B, 64, H/4, W/4]
+        x1 = self.layer1(x1)       # [B, 256, H/4, W/4]
+        x2 = self.layer2(x1)       # [B, 512, H/8, W/8]
+        x3 = self.layer3(x2)       # [B, 1024, H/16, W/16]
+        x4 = self.layer4(x3)       # [B, 2048, H/32, W/32]
+
+        # ---- Decoder ----
+        d4 = self.up4(x4, x3)
+        d3 = self.up3(d4, x2)
+        d2 = self.up2(d3, x1)
+        d1 = self.up1(d2, x0)
+
+        out = F.interpolate(d1, scale_factor=2, mode='bilinear', align_corners=False)
+        out = self.final_up(out)
+
+        return {
+            "room_mask": self.room_head(out),
+            "door_mask": self.door_head(out),
+        }
+# ---------------------------------------------------------------------------
+# Transforms
+# ---------------------------------------------------------------------------
+
+# ImageNet normalization — standard when using a pretrained ResNet backbone
+IMAGENET_MEAN = 0.485
+IMAGENET_STD  = 0.229
+
+imagenet_transforms = transforms.Compose([
+    transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+])
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------        
 def train(args):
     print(f"DEBUG zarr verions:{zarr.__version__}")
     print(f"DEBUG s3fs verions:{s3fs.__version__}")
@@ -140,7 +285,7 @@ def train(args):
         pin_memory=True,
     )
     
-    model     = InteriorBoundsCNN().to(device)
+    model     = ResNetUNet().to(device)
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
@@ -151,6 +296,8 @@ def train(args):
         # --- Train ---
         model.train()
         train_loss = 0.0
+        #scaler = torch.cuda.amp.GradScaler()
+        
         for batch in train_loader:
             inside_mask  = batch["inside_mask"].to(device).float()
             boundary_mask  = batch["boundary_mask"].to(device).float()
