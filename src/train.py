@@ -2,6 +2,7 @@ import os
 import shutil
 import argparse
 import glob
+from time import perf_counter
 
 import numpy as np
 import zarr
@@ -18,6 +19,25 @@ def find_zarr_store(channel_dir):
     if not matches:
         raise FileNotFoundError(f"No .zarr store found in {channel_dir}")
     return matches[0]
+
+class BinaryDiceLoss(nn.Module):
+    def __init__(self, smooth=1e-6):
+        super(BinaryDiceLoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, outputs, targets):
+        # Apply sigmoid to convert logits to probabilities
+        probs = torch.sigmoid(outputs)
+        
+        # Flatten tensors
+        probs = probs.view(-1)
+        targets = targets.view(-1)
+        
+        intersection = (probs * targets).sum()
+        dice = (2. * intersection + self.smooth) / (probs.sum() + targets.sum() + self.smooth)
+        
+        return 1 - dice
+
 
 # ---------------------------------------------------------------------------
 # Dataset
@@ -123,12 +143,6 @@ class InteriorBoundsCNN(nn.Module):
             'room_mask': self.room_head(d1),
             'door_mask': self.door_head(d1),
         }
-
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torchvision import models
 
 
 class ConvBlock(nn.Module):
@@ -286,17 +300,20 @@ def train(args):
     )
     
     model     = ResNetUNet().to(device)
-    criterion = nn.BCEWithLogitsLoss()
+    criterion_1 = nn.BCEWithLogitsLoss()
+    criterion_2 = BinaryDiceLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
     best_val_loss = float("inf")
-
+    
     for epoch in range(1, args.epochs + 1):
-
+        # --- Epoch Timing ---
+        epoch_start = perf_counter()
+        
         # --- Train ---
         model.train()
         train_loss = 0.0
-        #scaler = torch.cuda.amp.GradScaler()
+        scaler = torch.cuda.amp.GradScaler()
         
         for batch in train_loader:
             inside_mask  = batch["inside_mask"].to(device).float()
@@ -305,14 +322,27 @@ def train(args):
             door_mask  = batch["door_mask"].to(device).float().unsqueeze(1)
 
             optimizer.zero_grad()
+            """
             predictions = model(inside_mask, boundary_mask)
             loss = criterion(predictions['room_mask'], room_mask) \
                 + criterion(predictions['door_mask'], door_mask)
                 
             loss.backward()
             optimizer.step()
+            """
+            with torch.cuda.amp.autocast():
+                predictions = model(inside_mask, boundary_mask)
+                loss_1 = criterion_1(predictions['room_mask'], room_mask) \
+                + criterion_1(predictions['door_mask'], door_mask)
+                loss_2 = criterion_2(predictions['room_mask'], room_mask) \
+                + criterion_2(predictions['door_mask'], door_mask)
 
-            train_loss += loss.item()
+            total_loss = loss_1 + loss_2
+            scaler.scale(total_loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
+            train_loss += total_loss.item()
 
         train_loss /= len(train_loader)
 
@@ -327,12 +357,18 @@ def train(args):
                 door_mask     = batch['door_mask'].to(device).float().unsqueeze(1)
 
                 predictions = model(inside_mask, boundary_mask)
-                loss = criterion(predictions['room_mask'], room_mask) \
-                     + criterion(predictions['door_mask'], door_mask)
-                val_loss += loss.item()
+                loss_1 = criterion_1(predictions['room_mask'], room_mask) \
+                + criterion_1(predictions['door_mask'], door_mask)
+                loss_2 = criterion_2(predictions['room_mask'], room_mask) \
+                + criterion_2(predictions['door_mask'], door_mask)
+                
+                total_loss = loss_1 + loss_2
+                val_loss += total_loss.item()
 
         val_loss /= len(val_loader)
-        print(f"Epoch {epoch:03d} | train loss: {train_loss:.4f} | val loss: {val_loss:.4f}")
+        epoch_end = perf_counter()
+        epoch_duration = epoch_end - epoch_start
+        print(f"Epoch {epoch:03d} | duration: {epoch_duration:.0f}| train loss: {train_loss:.4f} | val loss: {val_loss:.4f}")
 
         # --- Checkpoint ---
         if val_loss < best_val_loss:
