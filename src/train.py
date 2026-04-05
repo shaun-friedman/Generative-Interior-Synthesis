@@ -3,10 +3,13 @@ import shutil
 import argparse
 import glob
 from time import perf_counter
+import tarfile
+from urllib.parse import urlparse
 
 import numpy as np
 import zarr
 import s3fs
+import boto3
 
 import torch
 import torch.nn as nn
@@ -19,6 +22,34 @@ def find_zarr_store(channel_dir):
     if not matches:
         raise FileNotFoundError(f"No .zarr store found in {channel_dir}")
     return matches[0]
+
+def download_and_extract_state_dict(s3_uri: str, extract_dir: str = "./extracted_model") -> str | None:
+    """
+    Downloads model.tar.gz from S3 and extracts it.
+    Returns path to model_best.pth, or None if not found.
+    """
+    parsed = urlparse(s3_uri)
+    bucket = parsed.netloc
+    key    = parsed.path.lstrip("/")
+
+    os.makedirs(extract_dir, exist_ok=True)
+    local_tar = os.path.join(extract_dir, "model.tar.gz")
+
+    print(f"Downloading state dict from s3://{bucket}/{key} ...")
+    s3 = boto3.client("s3")
+    s3.download_file(bucket, key, local_tar)
+
+    print(f"Extracting to {extract_dir} ...")
+    with tarfile.open(local_tar, "r:gz") as t:
+        t.extractall(path=extract_dir)
+
+    pth_path = os.path.join(extract_dir, "model_best.pth")
+    if os.path.exists(pth_path):
+        print(f"Found model_best.pth at {pth_path}")
+        return pth_path
+    else:
+        print(f"Warning: model_best.pth not found. Extracted files: {os.listdir(extract_dir)}")
+        return None  
 
 class BinaryDiceLoss(nn.Module):
     def __init__(self, smooth=1e-6):
@@ -299,7 +330,21 @@ def train(args):
         pin_memory=True,
     )
     
-    model     = ResNetUNet().to(device)
+    model = ResNetUNet().to(device)
+    extract_dir = "./extracted_model"
+    
+    print("Checking state_dict arg...")
+    print(args.state_dict)
+    if args.state_dict:
+        print("Checking for state dict..")
+        state_dict_path = download_and_extract_state_dict(args.state_dict, extract_dir)
+        
+        if os.path.exists(state_dict_path):
+            print(f"Loading state dict from {state_dict_path}")
+            model.load_state_dict(torch.load(state_dict_path, map_location=device))
+        else:
+            print(f"Warning: model_best.pth not found in {args.state_dict}, training from scratch")
+        
     criterion_1 = nn.BCEWithLogitsLoss()
     criterion_2 = BinaryDiceLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
@@ -387,10 +432,9 @@ if __name__ == "__main__":
     parser.add_argument("--epochs",        type=int,   default=20)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--batch-size",    type=int,   default=32)
+    parser.add_argument("--state-dict", type=str, default=None)
     
     # Data
-    #parser.add_argument("--zarr-path",     type=str, default=None)
-    #parser.add_argument("--zarr-path", default=os.path.join(os.environ.get("SM_CHANNEL_ZARR", ""), "data.zarr"))
     parser.add_argument("--train-idx", default=os.path.join(os.environ["SM_CHANNEL_INDICES"], "train_indices.npy"))
     parser.add_argument("--val-idx",   default=os.path.join(os.environ["SM_CHANNEL_INDICES"], "val_indices.npy"))
         
