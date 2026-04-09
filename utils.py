@@ -120,7 +120,7 @@ def dedupe_edges(edges_list):
 	edge_dups = edge_df.groupby(["n1", "n2"]).agg({"edge_strength": "count"}).reset_index()
 	edge_dups = edge_dups[edge_dups["edge_strength"] > 1]
 	for n1, n2 in zip(edge_dups["n1"], edge_dups["n2"]):
-		edge_df = edge_df[~((edge_df["n1"]==n1)&(edge_df["n2"]==n2)&(edge_df["adj_type"]=="wall"))]
+		edge_df = edge_df[~((edge_df["n1"]==n1)&(edge_df["n2"]==n2)&(edge_df["adj_type"]==0))]
  
 	return edge_df
 	
