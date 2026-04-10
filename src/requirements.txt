@@ -1,3 +1,4 @@
 zarr
 s3fs
 kagglehub
+torch-geometric

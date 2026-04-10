@@ -1,15 +1,12 @@
 import os
 import shutil
 import argparse
-import glob
 from time import perf_counter
-import tarfile
 from urllib.parse import urlparse
 
 import numpy as np
 import zarr
 import s3fs
-import boto3
 
 import torch
 import torch.nn as nn
@@ -17,39 +14,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
 
-def find_zarr_store(channel_dir):
-    matches = glob.glob(os.path.join(channel_dir, "*.zarr"))
-    if not matches:
-        raise FileNotFoundError(f"No .zarr store found in {channel_dir}")
-    return matches[0]
-
-def download_and_extract_state_dict(s3_uri: str, extract_dir: str = "./extracted_model") -> str | None:
-    """
-    Downloads model.tar.gz from S3 and extracts it.
-    Returns path to model_best.pth, or None if not found.
-    """
-    parsed = urlparse(s3_uri)
-    bucket = parsed.netloc
-    key    = parsed.path.lstrip("/")
-
-    os.makedirs(extract_dir, exist_ok=True)
-    local_tar = os.path.join(extract_dir, "model.tar.gz")
-
-    print(f"Downloading state dict from s3://{bucket}/{key} ...")
-    s3 = boto3.client("s3")
-    s3.download_file(bucket, key, local_tar)
-
-    print(f"Extracting to {extract_dir} ...")
-    with tarfile.open(local_tar, "r:gz") as t:
-        t.extractall(path=extract_dir)
-
-    pth_path = os.path.join(extract_dir, "model_best.pth")
-    if os.path.exists(pth_path):
-        print(f"Found model_best.pth at {pth_path}")
-        return pth_path
-    else:
-        print(f"Warning: model_best.pth not found. Extracted files: {os.listdir(extract_dir)}")
-        return None  
+from utils import download_and_extract_state_dict
 
 class BinaryDiceLoss(nn.Module):
     def __init__(self, smooth=1e-6):
@@ -82,8 +47,6 @@ class ZarrDataset(Dataset):
 
     def _open_store(self):
         if not hasattr(self, 'store'):
-            #fs = s3fs.S3FileSystem()
-            #store = s3fs.S3Map(root=self.zarr_path, s3=fs, check=False)
             self.store = zarr.open(self.zarr_path, mode='r')
 
     def __len__(self):
@@ -97,12 +60,6 @@ class ZarrDataset(Dataset):
         boundary_mask = self.store['boundary_masks'][i]
         room_mask =     self.store['room_masks'][i]
         door_mask =     self.store['door_masks'][i]
-
-        """ if self.transforms:
-            inside_mask =   self.transforms(inside_mask)
-            boundary_mask = self.transforms(boundary_mask)
-            room_mask =     self.transforms(room_mask)
-            door_mask =     self.transforms(door_mask) """
         
         return {
             'inside_mask':   torch.from_numpy(inside_mask),
@@ -294,12 +251,6 @@ def train(args):
 
     zarr_channel = os.environ["SM_CHANNEL_ZARR"]
     print(f"SM_CHANNEL_ZARR: {zarr_channel}")
-    
-    """ print("Contents of zarr channel:")
-    for root, dirs, files in os.walk(zarr_channel):
-        print(f"{root}")
-        for f in files:
-            print(f"  {f}") """
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -367,14 +318,7 @@ def train(args):
             door_mask  = batch["door_mask"].to(device).float().unsqueeze(1)
 
             optimizer.zero_grad()
-            """
-            predictions = model(inside_mask, boundary_mask)
-            loss = criterion(predictions['room_mask'], room_mask) \
-                + criterion(predictions['door_mask'], door_mask)
-                
-            loss.backward()
-            optimizer.step()
-            """
+
             with torch.cuda.amp.autocast():
                 predictions = model(inside_mask, boundary_mask)
                 loss_1 = criterion_1(predictions['room_mask'], room_mask) \

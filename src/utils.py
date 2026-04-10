@@ -3,23 +3,63 @@ import cv2 as cv
 import pandas as pd
 from itertools import chain
 from math import hypot
+from urllib.parse import urlparse
+import tarfile
+import os
+import boto3
+import glob
+
+def find_zarr_store(channel_dir):
+    matches = glob.glob(os.path.join(channel_dir, "*.zarr"))
+    if not matches:
+        raise FileNotFoundError(f"No .zarr store found in {channel_dir}")
+    return matches[0]
+
+def download_and_extract_state_dict(s3_uri: str, extract_dir: str = "./extracted_model") -> str | None:
+    """
+    Downloads model.tar.gz from S3 and extracts it.
+    Returns path to model_best.pth, or None if not found.
+    """
+    parsed = urlparse(s3_uri)
+    bucket = parsed.netloc
+    key    = parsed.path.lstrip("/")
+
+    os.makedirs(extract_dir, exist_ok=True)
+    local_tar = os.path.join(extract_dir, "model.tar.gz")
+
+    print(f"Downloading state dict from s3://{bucket}/{key} ...")
+    s3 = boto3.client("s3")
+    s3.download_file(bucket, key, local_tar)
+
+    print(f"Extracting to {extract_dir} ...")
+    with tarfile.open(local_tar, "r:gz") as t:
+        t.extractall(path=extract_dir)
+
+    pth_path = os.path.join(extract_dir, "model_best.pth")
+    if os.path.exists(pth_path):
+        print(f"Found model_best.pth at {pth_path}")
+        return pth_path
+    else:
+        print(f"Warning: model_best.pth not found. Extracted files: {os.listdir(extract_dir)}")
+        return None 
 
 def get_vocab():
-    room_label = [(0, 'LivingRoom', 1, "PublicArea"),
-              (1, 'MasterRoom', 0, "Bedroom"),
-              (2, 'Kitchen', 1, "FunctionArea"),
-              (3, 'Bathroom', 0, "FunctionArea"),
-              (4, 'DiningRoom', 1, "FunctionArea"),
-              (5, 'ChildRoom', 0, "Bedroom"),
-              (6, 'StudyRoom', 0, "Bedroom"),
-              (7, 'SecondRoom', 0, "Bedroom"),
-              (8, 'GuestRoom', 0, "Bedroom"),
-              (9, 'Balcony', 1, "PublicArea"),
-              (10, 'Entrance', 1, "PublicArea"),
-              (11, 'Storage', 0, "PublicArea"),
-              (12, 'Wall-in', 0, "PublicArea"),
-              (13, 'External', 0, "External"),
-              (14, 'ExteriorWall', 0, "ExteriorWall")
+    room_label = [
+        (0, 'LivingRoom', 1, "PublicArea"),
+        (1, 'MasterRoom', 0, "Bedroom"),
+        (2, 'Kitchen', 1, "FunctionArea"),
+        (3, 'Bathroom', 0, "FunctionArea"),
+        (4, 'DiningRoom', 1, "FunctionArea"),
+        (5, 'ChildRoom', 0, "Bedroom"),
+        (6, 'StudyRoom', 0, "Bedroom"),
+        (7, 'SecondRoom', 0, "Bedroom"),
+        (8, 'GuestRoom', 0, "Bedroom"),
+        (9, 'Balcony', 1, "PublicArea"),
+        (10, 'Entrance', 1, "PublicArea"),
+        (11, 'Storage', 0, "PublicArea"),
+        (12, 'Wall-in', 0, "PublicArea"),
+        (13, 'External', 0, "External"),
+        (14, 'ExteriorWall', 0, "ExteriorWall")
     ]
     
     vocab = {
