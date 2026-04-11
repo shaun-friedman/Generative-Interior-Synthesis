@@ -2,3 +2,5 @@ zarr
 s3fs
 kagglehub
 opencv-python
+torch-geometric
+torchvision
