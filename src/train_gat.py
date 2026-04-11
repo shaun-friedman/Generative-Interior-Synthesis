@@ -10,15 +10,17 @@ import s3fs
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-from torch_geometric.nn import GATConv, BatchNorm
+from torch.utils.data import Dataset
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import GATConv, GraphNorm
+from torch_geometric.data import Data
 
 from utils import download_and_extract_state_dict
 
-CLASS_WEIGHTS = torch.tensor([0.147306, 0.146718, 0.141799, 0.177072, 
-                 0.002392, 0.007162, 0.027323, 0.182312, 
-                 0.001568, 0.157803, 0.000532, 0.006110, 
-                 0.001902], dtype=torch.float)
+CLASS_WEIGHTS = torch.tensor([
+    0.0018, 0.0018, 0.0018, 0.0015, 0.1089, 
+    0.0364, 0.0095, 0.0014, 0.1662,
+    0.0017, 0.4894, 0.0426, 0.1370], dtype=torch.float)
 
 # ---------------------------------------------------------------------------
 # Dataset
@@ -27,7 +29,6 @@ class ZarrDataset(Dataset):
     def __init__(self, zarr_path, indices):
         self.zarr_path = zarr_path
         self.indices = indices
-        print(f"DEBUG init zarr_path: {zarr_path}")
 
     def _open_store(self):
         if not hasattr(self, 'store'):
@@ -38,29 +39,53 @@ class ZarrDataset(Dataset):
 
     def __getitem__(self, idx):
         self._open_store()
-        i = self.indices[idx] 
+        i = self.indices[idx]
 
-        edge_attr =   self.store['edge_attr'][i]
-        edge_index = self.store['edge_index'][i] - 5 # zero index all nodes
-        edge_totals =     self.store['edge_totals'][i]
-        node_features =     self.store['node_features'][i]
-        node_totals =     self.store['node_totals'][i]
-        node_labels =     self.store['node_labels'][i]
+        edge_attr = self.store['edge_attr'][i]      # [2, E]
+        edge_index = self.store['edge_index'][i] - 5   # [2, E]
+        edge_totals = self.store['edge_totals'][i]
+        node_features = self.store['node_features'][i]
+        node_totals = self.store['node_totals'][i]
+        node_labels = self.store['node_labels'][i]
+
+        n = int(node_totals[0])
+        e = int(edge_totals[0])
+
+        # --- slice valid ---
+        x = torch.from_numpy(node_features[:n]).float()
+        x[:, :2] /= 256.0   # scaling
+        x[:, 2]  /= 10000.0
         
-        return {
-            'edge_attr':   torch.from_numpy(edge_attr),
-            'edge_index': torch.from_numpy(edge_index),
-            'edge_totals':     torch.from_numpy(edge_totals),
-            'node_features':     torch.from_numpy(node_features),
-            'node_totals':     torch.from_numpy(node_totals),
-            'node_labels':     torch.from_numpy(node_labels),
-        }
+        y = torch.from_numpy(node_labels[:n]).long()
+
+        ei = torch.from_numpy(edge_index[:, :e]).long()
+        ea = torch.from_numpy(edge_attr[:, :e]).float()
+
+        # --- make bidirectional ---
+        if e > 0:
+            ei = torch.cat([ei, ei.flip(0)], dim=1)
+            ea = torch.cat([ea, ea], dim=1)
+
+        # --- final shape for PyG ---
+        edge_attr = ea.T.contiguous()  # [E, 2]
+
+        # --- data validation ---
+        assert ei.numel() == 0 or ei.max() < n, f"Edge index out of bounds: {ei.max()} >= {n}"
+        assert ei.numel() == 0 or ei.min() >= 0, f"Negative edge index: {ei.min()}"
+        assert y.min() >= 0 and y.max() < 13
+
+        return Data(
+            x=x,
+            edge_index=ei,
+            edge_attr=edge_attr,
+            y=y
+        )
         
 
 # ---------------------------------------------------------------------------
 # GAT Model
 # ---------------------------------------------------------------------------
-class FloorplanGNN(torch.nn.Module):
+class FloorplanGNN(nn.Module):
     """
     Node-classification GNN for floorplan graphs.
 
@@ -96,7 +121,7 @@ class FloorplanGNN(torch.nn.Module):
             concat=True,
             dropout=dropout,
         )
-        self.bn1 = BatchNorm(hidden_dim * heads_1)
+        self.bn1 = GraphNorm(hidden_dim * heads_1)
 
         # Layer 2: hidden*heads_1 → hidden*heads_2
         self.conv2 = GATConv(
@@ -107,13 +132,13 @@ class FloorplanGNN(torch.nn.Module):
             concat=True,
             dropout=dropout,
         )
-        self.bn2 = BatchNorm(hidden_dim * heads_2)
+        self.bn2 = GraphNorm(hidden_dim * heads_2)
 
         # Classifier head
         self.classifier = torch.nn.Linear(hidden_dim * heads_2, num_classes)
 
     def forward(self, data):
-        x, edge_index, edge_attr = data["x"], data["edge_index"], data["edge_attr"]
+        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
 
         # Layer 1
         x = self.conv1(x, edge_index, edge_attr=edge_attr)
@@ -170,7 +195,7 @@ def train(args):
         pin_memory=True,
     )
     
-    model = FloorplanGNN().to(device)
+    model = FloorplanGNN(dropout=args.dropout).to(device)
     extract_dir = "./extracted_model"
     
     print("Checking state_dict arg...")
@@ -192,62 +217,25 @@ def train(args):
     
     scaler = torch.cuda.amp.GradScaler()
     for epoch in range(1, args.epochs + 1):
-        # --- Epoch Timing ---
         epoch_start = perf_counter()
-        
+
         # --- Train ---
         model.train()
         train_loss = 0.0
-        
+
         for batch in train_loader:
-            node_totals = batch["node_totals"].squeeze(-1)   # [B]
-            edge_totals = batch["edge_totals"].squeeze(-1)   # [B]
-
-            # Unpad and concatenate nodes across the batch
-            node_features_list, node_labels_list = [], []
-            edge_index_list, edge_attr_list = [], []
-            node_offset = 0
-
-            for i in range(len(node_totals)):
-                n = node_totals[i].item()
-                e = edge_totals[i].item()
-
-                node_features_list.append(batch["node_features"][i, :n, :])   # [n, 3]
-                node_labels_list.append(batch["node_labels"][i, :n])           # [n]
-
-                ei = batch["edge_index"][i, :, :e].long()                      # [2, e]
-
-                # Make bidirectional
-                ei_bidir = torch.cat([ei, ei.flip(0)], dim=1)           # [2, 2e]
-                ea = batch["edge_attr"][i, :, :e]
-                ea_bidir = torch.cat([ea, ea], dim=1)                    # [2, 2e] — same attrs both directions
-
-                ei_bidir = ei_bidir + node_offset
-                edge_index_list.append(ei_bidir)
-                edge_attr_list.append(ea_bidir)           # [2, e]
-
-                node_offset += n
-
-            x           = torch.cat(node_features_list, dim=0).to(device).float()   # [N_total, 3]
-            node_labels = torch.cat(node_labels_list,   dim=0).to(device).long()    # [N_total]
-            edge_index  = torch.cat(edge_index_list,    dim=1).to(device).long()    # [2, E_total]
-            edge_attr   = torch.cat(edge_attr_list,     dim=1).to(device).float().T # [E_total, 2]
-
-            assert node_labels.min() >= 0, \
-                f"Negative label found: min={node_labels.min()}, likely unmatched padding sentinel"
-            assert node_labels.max() < 13, \
-                f"Label {node_labels.max()} exceeds num_classes=13"
-                
-            data = {"x": x, "edge_index": edge_index, "edge_attr": edge_attr}
+            batch = batch.to(device)
 
             optimizer.zero_grad()
+
             with torch.cuda.amp.autocast():
-                logits = model(data)
-                loss   = F.cross_entropy(logits, node_labels)
+                logits = model(batch)
+                loss = criterion(logits, batch.y)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+
             train_loss += loss.item()
 
         train_loss /= len(train_loader)
@@ -255,46 +243,25 @@ def train(args):
         # --- Validate ---
         model.eval()
         val_loss = 0.0
+        acc = 0.0
+
         with torch.no_grad():
             for batch in val_loader:
-                node_totals = batch["node_totals"].squeeze(-1)   # [B]
-                edge_totals = batch["edge_totals"].squeeze(-1)   # [B]
+                batch = batch.to(device)
 
-                # Unpad and concatenate nodes across the batch
-                node_features_list, node_labels_list = [], []
-                edge_index_list, edge_attr_list = [], []
-                node_offset = 0
-
-                for i in range(len(node_totals)):
-                    n = node_totals[i].item()
-                    e = edge_totals[i].item()
-
-                    node_features_list.append(batch["node_features"][i, :n, :])   # [n, 3]
-                    node_labels_list.append(batch["node_labels"][i, :n])           # [n]
-
-                    ei = batch["edge_index"][i, :, :e].long()                      # [2, e]
-                    ei = ei + node_offset                                          # global offset
-                    edge_index_list.append(ei)
-                    edge_attr_list.append(batch["edge_attr"][i, :, :e])            # [2, e]
-
-                    node_offset += n
-
-                x           = torch.cat(node_features_list, dim=0).to(device).float()   # [N_total, 3]
-                node_labels = torch.cat(node_labels_list,   dim=0).to(device).long()    # [N_total]
-                edge_index  = torch.cat(edge_index_list,    dim=1).to(device).long()    # [2, E_total]
-                edge_attr   = torch.cat(edge_attr_list,     dim=1).to(device).float().T # [E_total, 2]
-
-                data = {"x": x, "edge_index": edge_index, "edge_attr": edge_attr}
-
-                logits = model(data)
-                loss = criterion(logits, node_labels)
+                logits = model(batch)
+                loss = criterion(logits, batch.y)
+                preds = logits.argmax(dim=-1)
+                acc += (preds == batch.y).float().mean().item()
 
                 val_loss += loss.item()
 
         val_loss /= len(val_loader)
-        epoch_end = perf_counter()
-        epoch_duration = epoch_end - epoch_start
-        print(f"Epoch {epoch:03d} | duration: {epoch_duration:.0f}| train loss: {train_loss:.4f} | val loss: {val_loss:.4f}")
+        acc /= len(val_loader)
+
+        epoch_duration = perf_counter() - epoch_start
+
+        print(f"Epoch {epoch:03d} | duration: {epoch_duration:.0f} | train loss: {train_loss:.4f} | val loss: {val_loss:.4f}| val acc: {acc:.4f}")
 
         # --- Checkpoint ---
         if val_loss < best_val_loss:
@@ -314,6 +281,7 @@ if __name__ == "__main__":
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--batch-size",    type=int,   default=32)
     parser.add_argument("--state-dict",    type=str,   default=None)
+    parser.add_argument("--dropout",       type=float, default=0.3)
     
     # Data
     parser.add_argument("--train-idx", default=os.path.join(os.environ["SM_CHANNEL_INDICES"], "train_indices.npy"))
