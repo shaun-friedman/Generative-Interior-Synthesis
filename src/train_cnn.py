@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
 
-from utils import download_and_extract_state_dict
+from .utils import download_and_extract_state_dict
 
 class BinaryDiceLoss(nn.Module):
     def __init__(self, smooth=1e-6):

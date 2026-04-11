@@ -8,6 +8,7 @@ import tarfile
 import os
 import boto3
 import glob
+import torch
 
 def find_zarr_store(channel_dir):
     matches = glob.glob(os.path.join(channel_dir, "*.zarr"))
@@ -15,7 +16,9 @@ def find_zarr_store(channel_dir):
         raise FileNotFoundError(f"No .zarr store found in {channel_dir}")
     return matches[0]
 
-def download_and_extract_state_dict(s3_uri: str, extract_dir: str = "./extracted_model") -> str | None:
+def download_and_extract_state_dict(s3_uri: str, extract_dir: str = "./extracted_model",
+                                    model_artifact: str = "model.tar.gz", 
+                                    state_dict_path: str = "model_best.pth") -> str | None:
     """
     Downloads model.tar.gz from S3 and extracts it.
     Returns path to model_best.pth, or None if not found.
@@ -25,7 +28,7 @@ def download_and_extract_state_dict(s3_uri: str, extract_dir: str = "./extracted
     key    = parsed.path.lstrip("/")
 
     os.makedirs(extract_dir, exist_ok=True)
-    local_tar = os.path.join(extract_dir, "model.tar.gz")
+    local_tar = os.path.join(extract_dir, model_artifact)
 
     print(f"Downloading state dict from s3://{bucket}/{key} ...")
     s3 = boto3.client("s3")
@@ -35,7 +38,7 @@ def download_and_extract_state_dict(s3_uri: str, extract_dir: str = "./extracted
     with tarfile.open(local_tar, "r:gz") as t:
         t.extractall(path=extract_dir)
 
-    pth_path = os.path.join(extract_dir, "model_best.pth")
+    pth_path = os.path.join(extract_dir, state_dict_path)
     if os.path.exists(pth_path):
         print(f"Found model_best.pth at {pth_path}")
         return pth_path
@@ -73,6 +76,42 @@ def get_vocab():
     vocab['object_idx_to_name'] = [label for index,label,_,_ in room_label]
 
     return vocab
+
+def model_fn(state_dict_pth:str, model_obj):
+    """Load model from the model_dir. Called once on container startup."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model_obj
+    model.load_state_dict(
+        torch.load(state_dict_pth, map_location=device)
+    )
+    model.to(device)
+    model.eval()
+    return model
+
+def model_thresholding(pred: np.array, threshold: float) -> np.array:
+    return np.where(pred >= threshold, 1, 0)
+
+def post_process_stacked_layers(pred_room_bin: np.array, pred_door_bin: np.array):
+    stacked_layers = np.sum([pred_room_bin*2, pred_door_bin*4], axis=0)
+    
+    # Correct overlap
+    stacked_layers[stacked_layers >= 4] = 4
+    
+    img = stacked_layers.copy().astype(np.uint8)
+    
+    # Dilation
+    dilate_kernel = np.ones((5,5), np.uint8)
+    img = cv.dilate(img, dilate_kernel, iterations = 1)
+    
+    # Closing
+    close_kernel = np.ones((5,5), np.uint8)
+    img = cv.morphologyEx(img, cv.MORPH_CLOSE, close_kernel, iterations=2)
+    
+    # Erosion
+    erode_kernel = np.ones((5,5), np.uint8)
+    img = cv.erode(img, erode_kernel, iterations = 1)
+    
+    return img
 
 def stack_normalize(boundary_mask, room_mask, door_mask):
     stacked_layers = np.sum([boundary_mask, room_mask*3, door_mask*4], axis=0)

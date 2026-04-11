@@ -15,7 +15,7 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GATConv, GraphNorm
 from torch_geometric.data import Data
 
-from utils import download_and_extract_state_dict
+from .utils import download_and_extract_state_dict
 
 CLASS_WEIGHTS = torch.tensor([
     0.0018, 0.0018, 0.0018, 0.0015, 0.1089, 
