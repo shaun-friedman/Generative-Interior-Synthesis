@@ -1,6 +1,6 @@
 # Generative Interior Synthesis
 
-A machine learning pipeline that learns the structural patterns of real-world floor plans and uses a **Graph Attention Network (GAT)** to generate novel, architecturally plausible interior layouts.
+A machine learning pipeline that learns the structural patterns of real-world floor plans and uses a two stage process consisting of a **ResNetUNet (CNN)** and a **Graph Attention Network (GAT)** to generate novel, architecturally plausible interior layouts.
 
 ---
 
@@ -20,7 +20,7 @@ Generative-Interior-Synthesis/
 ├── 1_Setup.ipynb               # Environment setup and dataset download
 ├── 2_Ingestion.ipynb           # Floor plan parsing and mask extraction
 ├── 3_EDA.ipynb                 # Exploratory data analysis and visualization
-├── 4_Modeling.ipynb            # GAT model definition and training
+├── 4_Modeling.ipynb            # CNN and GAT model definition and training
 ├── 5_Testing.ipynb             # Inference, evaluation, and synthesis
 ├── gat_batch_pred.pt           # Saved GAT model weights
 ├── train_indices.npy           # Training split indices
@@ -35,10 +35,10 @@ Generative-Interior-Synthesis/
 ## Pipeline
 
 ### 1. Setup (`1_Setup.ipynb`)
-Installs dependencies and downloads the floor plan dataset via `kagglehub`. Configure your Kaggle credentials before running.
+Installs dependencies and establishes AWS storage locations.
 
 ### 2. Ingestion (`2_Ingestion.ipynb`)
-Parses raw floor plan images into four binary spatial masks:
+Downloads and parses raw floor plan images into four binary spatial masks:
 
 | Mask | Description |
 |---|---|
@@ -49,14 +49,18 @@ Parses raw floor plan images into four binary spatial masks:
 
 These masks are then converted into graph representations where nodes correspond to rooms and edges encode spatial adjacency.
 
+All valid instances and graphs are then passed to a Zarr datastore to be accessed during training and testing.
+
 ### 3. EDA (`3_EDA.ipynb`)
 Exploratory analysis of the parsed floor plans, including mask visualizations, room count distributions, adjacency statistics, and data quality checks.
 
 ### 4. Modeling (`4_Modeling.ipynb`)
-Defines and trains a **Graph Attention Network (GAT)** using PyTorch Geometric. The model learns to predict spatial relationships between rooms from the graph-structured floor plan data. Trained weights are saved to `gat_batch_pred.pt`.
+Defines and trains two models: 
+1. **ResNetUNet (CNN)** usig PyTorch. This model learns to generate interior boundarys, (walls and doors), given exterior walls and inside mask. 
+2. **Graph Attention Network (GAT)** using PyTorch Geometric. The model learns to predict spatial relationships between rooms from the graph-structured floor plan data.
 
 ### 5. Testing (`5_Testing.ipynb`)
-Loads the trained GAT and runs inference to synthesize new floor plan graphs. Evaluates output quality and visualizes generated layouts.
+Loads the trained CNN and GAT and runs inference to synthesize new floor plan graphs. Evaluates output quality and visualizes generated layouts.
 
 ---
 
@@ -82,7 +86,7 @@ pip install -r requirements.txt
 
 ## Dataset
 
-The dataset is downloaded automatically in `1_Setup.ipynb` via `kagglehub`. You will need a [Kaggle account](https://www.kaggle.com) and API credentials (`~/.kaggle/kaggle.json`) configured before running setup.
+The dataset is downloaded automatically in `2_Ingestion.ipynb` via `kagglehub`. You will need a [Kaggle account](https://www.kaggle.com) and API credentials (`~/.kaggle/kaggle.json`) configured before running setup.
 
 ---
 
@@ -93,8 +97,6 @@ Run the notebooks in order:
 ```
 1_Setup.ipynb → 2_Ingestion.ipynb → 3_EDA.ipynb → 4_Modeling.ipynb → 5_Testing.ipynb
 ```
-
-A pre-trained model checkpoint (`gat_batch_pred.pt`) is included in the repository, so you can skip directly to `5_Testing.ipynb` to run inference without retraining.
 
 ---
 
