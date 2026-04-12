@@ -22,7 +22,7 @@ Generative-Interior-Synthesis/
 ├── 3_EDA.ipynb                 # Exploratory data analysis and visualization
 ├── 4_Modeling.ipynb            # CNN and GAT model definition and training
 ├── 5_Testing.ipynb             # Inference, evaluation, and synthesis
-├── gat_batch_pred.pt           # Saved GAT model weights
+├── gat_batch_pred.pt           # Saved GAT testing data
 ├── train_indices.npy           # Training split indices
 ├── val_indices.npy             # Validation split indices
 ├── batch_durations.npy         # Logged batch timing data
