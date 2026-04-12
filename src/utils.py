@@ -190,18 +190,24 @@ def extract_adjacencies(cond_arr):
 
 
 def dedupe_edges(edges_list):
-	edges_list = [e for e in edges_list if e is not None]
-	edge_df = pd.DataFrame(chain(*edges_list)).dropna()
-	edge_df = edge_df.groupby(["n1", "n2", "adj_type"]).agg({"adj_type": "count"})
-	edge_df.columns = ["edge_strength"]
-	edge_df = edge_df[edge_df["edge_strength"] > 1].reset_index()
- 
-	edge_dups = edge_df.groupby(["n1", "n2"]).agg({"edge_strength": "count"}).reset_index()
-	edge_dups = edge_dups[edge_dups["edge_strength"] > 1]
-	for n1, n2 in zip(edge_dups["n1"], edge_dups["n2"]):
-		edge_df = edge_df[~((edge_df["n1"]==n1)&(edge_df["n2"]==n2)&(edge_df["adj_type"]==0))]
- 
-	return edge_df
+    edges_list = [e for e in edges_list if e is not None]
+    if not edges_list:
+        return pd.DataFrame(columns=["n1", "n2", "adj_type", "edge_strength"])
+    
+    edge_df = pd.DataFrame(chain(*edges_list)).dropna()
+    if edge_df.empty or "n1" not in edge_df.columns:
+        return pd.DataFrame(columns=["n1", "n2", "adj_type", "edge_strength"])
+    
+    edge_df = edge_df.groupby(["n1", "n2", "adj_type"]).agg({"adj_type": "count"})
+    edge_df.columns = ["edge_strength"]
+    edge_df = edge_df[edge_df["edge_strength"] > 1].reset_index()
+
+    edge_dups = edge_df.groupby(["n1", "n2"]).agg({"edge_strength": "count"}).reset_index()
+    edge_dups = edge_dups[edge_dups["edge_strength"] > 1]
+    for n1, n2 in zip(edge_dups["n1"], edge_dups["n2"]):
+        edge_df = edge_df[~((edge_df["n1"]==n1) & (edge_df["n2"]==n2) & (edge_df["adj_type"]==0))]
+
+    return edge_df
 	
 
 def extract_all_adjacencies(img):
