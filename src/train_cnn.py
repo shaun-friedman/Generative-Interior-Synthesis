@@ -2,7 +2,6 @@ import os
 import shutil
 import argparse
 from time import perf_counter
-from urllib.parse import urlparse
 
 import numpy as np
 import zarr
