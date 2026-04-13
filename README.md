@@ -63,6 +63,10 @@ Defines and trains two models:
 Loads the trained CNN and GAT and runs inference to synthesize new floor plan graphs. Evaluates output quality and visualizes generated layouts.
 
 ---
+### Additional Python Files
+The src folder contains training scripts for each model (train_cnn.py, train_gat.py) and helper functions (utils.py).
+
+---
 
 ## Installation
 
