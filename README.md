@@ -28,6 +28,33 @@ Evaluated on the validation split (16,158 of 80,788 plans).
 - **Accuracy is modest.** It beats the baseline by 41.12 percentage points, but 40.65% of rooms are still mislabelled. The 59.35% was measured on graphs built from real floor plans. Generated plans have no ground-truth room types, so their labelling accuracy can't be measured directly.
 - **"Usable graph"** means that, after thresholding the U-Net output, the extracted graph could be passed through the GAT without error. It says nothing about whether the layout is sensible.
 
+### Per-class GAT performance
+
+![GAT confusion matrix on validation graphs, row-normalized](docs/confusion_matrix_gat_gt.png)
+
+*GAT predictions on graphs built from real validation floor plans (109,603 rooms). Each row is a true room type and sums to 1, so the diagonal is recall. Produced by `New_Metrics.ipynb`.*
+
+| Room type | Precision | Recall | F1 | Rooms |
+|---|---|---|---|---|
+| LivingRoom | 0.99 | 0.97 | 0.98 | 16,158 |
+| MasterRoom | 0.71 | 0.72 | 0.71 | 16,097 |
+| Kitchen | 0.65 | 0.44 | 0.52 | 15,560 |
+| Bathroom | 0.79 | 0.50 | 0.62 | 19,348 |
+| DiningRoom | 0.02 | 0.52 | 0.04 | 253 |
+| ChildRoom | 0.03 | 0.19 | 0.05 | 791 |
+| StudyRoom | 0.15 | 0.25 | 0.19 | 2,923 |
+| SecondRoom | 0.71 | 0.28 | 0.41 | 20,008 |
+| GuestRoom | 0.01 | 0.20 | 0.01 | 162 |
+| Balcony | 0.81 | 0.71 | 0.76 | 17,324 |
+| Entrance | 0.01 | 0.30 | 0.03 | 57 |
+| Storage | 0.10 | 0.39 | 0.16 | 689 |
+| Wall-in | 0.02 | 0.55 | 0.04 | 233 |
+| **Macro average** | 0.39 | 0.46 | 0.35 | |
+
+- **Living rooms are solved; bedrooms are not.** LivingRoom reaches 0.97 recall, and MasterRoom and Balcony are above 0.70. The five bedroom types (Master, Child, Study, Second, Guest) are mostly confused with each other. SecondRoom, the most common room type, has only 0.28 recall: 21% of second rooms are called MasterRoom. Position, area and adjacency alone don't separate rooms that look alike.
+- **Small service rooms blur together.** 19% of bathrooms are predicted as Wall-in, and storage rooms go to Wall-in (23%) or Bathroom (15%).
+- **Rare classes are over-predicted.** The class weighting pushes recall on rare types up to 0.20–0.55, but their precision is 0.01–0.15. Almost every DiningRoom, GuestRoom, Entrance or Wall-in prediction is wrong. This matches the inflated Entrance rate in generated plans (see Limitations).
+
 ---
 
 ## How it works
@@ -84,12 +111,13 @@ For training data, each extracted node is labelled with the room type of the nea
 ├── 3_EDA.ipynb          # Room counts, class balance, step-by-step graph extraction
 ├── 4_Modeling.ipynb     # Train/val split and SageMaker training pipelines
 ├── 5_Testing.ipynb      # End-to-end inference and evaluation
+├── New_Metrics.ipynb    # GAT confusion matrix and per-class metrics
 ├── src/
 │   ├── train_cnn.py     # U-Net model and training script
 │   ├── train_gat.py     # GAT model and training script
 │   └── utils.py         # Graph extraction and helpers
 ├── tests/               # Smoke test for graph extraction (run in CI)
-└── docs/                # README figure
+└── docs/                # README figures
 ```
 
 ---
